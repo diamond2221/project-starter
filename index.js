@@ -7,7 +7,7 @@ const readline = require( 'readline' );
 const os = require( 'os' );
 
 // 配置文件路径
-const CONFIG_FILE = path.join( os.homedir(), '.project-launcher.json' );
+const CONFIG_FILE = path.join( os.homedir(), '.project-starter.json' );
 
 // 默认配置
 const defaultConfig = {
@@ -43,34 +43,74 @@ function saveConfig( config ) {
 }
 
 // 启动单个项目
-function startProject( projectName, config ) {
+async function startProject(projectName, config) {
     const projectConfig = config.projects[projectName];
 
-    if ( !projectConfig ) {
-        console.log( `\x1b[31m[错误] 未找到项目配置: ${projectName}\x1b[0m` );
+    if (!projectConfig) {
+        console.log(`\x1b[31m[错误] 未找到项目配置: ${projectName}\x1b[0m`);
         return null;
     }
 
     const projectPath = projectConfig.path;
 
     // 检查项目路径是否存在
-    if ( !fs.existsSync( projectPath ) ) {
-        console.log( `\x1b[31m[错误] 项目路径不存在: ${projectPath}\x1b[0m` );
+    if (!fs.existsSync(projectPath)) {
+        console.log(`\x1b[31m[错误] 项目路径不存在: ${projectPath}\x1b[0m`);
         return null;
     }
 
+    // 执行前置命令
+    if (projectConfig.preCommands && projectConfig.preCommands.length > 0) {
+        console.log(`\x1b[36m[准备] ${projectName}: 执行前置命令\x1b[0m`);
+
+        for (const preCommand of projectConfig.preCommands) {
+            console.log(`\x1b[36m[前置命令] ${preCommand}\x1b[0m`);
+
+            // 将命令拆分为主命令和参数
+            const [cmd, ...args] = preCommand.split(' ');
+
+            try {
+                // 同步执行前置命令
+                const result = spawn(cmd, args, {
+                    cwd: projectPath,
+                    stdio: 'inherit',
+                    shell: true
+                });
+
+                // 等待命令执行完成
+                await new Promise((resolve, reject) => {
+                    result.on('close', code => {
+                        if (code === 0) {
+                            resolve();
+                        } else {
+                            console.log(`\x1b[31m[警告] 前置命令退出码: ${code}\x1b[0m`);
+                            resolve(); // 即使失败也继续执行
+                        }
+                    });
+
+                    result.on('error', err => {
+                        console.error(`\x1b[31m[错误] 前置命令失败: ${err.message}\x1b[0m`);
+                        resolve(); // 即使失败也继续执行
+                    });
+                });
+            } catch (error) {
+                console.error(`\x1b[31m[错误] 执行前置命令失败: ${error.message}\x1b[0m`);
+            }
+        }
+    }
+
     const command = projectConfig.command;
-    console.log( `\x1b[36m[启动] ${projectName}: ${command} (路径: ${projectPath})\x1b[0m` );
+    console.log(`\x1b[36m[启动] ${projectName}: ${command} (路径: ${projectPath})\x1b[0m`);
 
     // 将命令拆分为主命令和参数
-    const [cmd, ...args] = command.split( ' ' );
+    const [cmd, ...args] = command.split(' ');
 
     // 使用 spawn 启动项目并保持输出流
-    const process = spawn( cmd, args, {
+    const process = spawn(cmd, args, {
         cwd: projectPath,
         stdio: 'pipe',
         shell: true
-    } );
+    });
 
     // 给进程着色输出
     const colors = ['\x1b[32m', '\x1b[33m', '\x1b[34m', '\x1b[35m', '\x1b[36m'];
@@ -94,14 +134,34 @@ function startProject( projectName, config ) {
 }
 
 // 添加新项目配置
-async function addProject( rl, config ) {
-    console.log( '\n\x1b[1m添加新项目\x1b[0m' );
+async function addProject(rl, config) {
+    console.log('\n\x1b[1m添加新项目\x1b[0m');
 
-    const name = await question( rl, '项目名称: ' );
-    const path = await question( rl, '项目路径: ' );
-    const command = await question( rl, '启动命令 (默认: npm run serve): ' ) || 'npm run serve';
+    const name = await question(rl, '项目名称: ');
+    const path = await question(rl, '项目路径: ');
+    const command = await question(rl, '启动命令 (默认: npm run serve): ') || 'npm run serve';
 
-    config.projects[name] = { path, command };
+    // 询问前置命令
+    const hasPreCommands = await question(rl, '是否需要添加前置命令? (y/N): ');
+
+    const preCommands = [];
+    if (hasPreCommands.toLowerCase() === 'y') {
+        console.log('请输入前置命令，每行一条，输入空行结束：');
+
+        let preCommand;
+        do {
+            preCommand = await question(rl, '> ');
+            if (preCommand) {
+                preCommands.push(preCommand);
+            }
+        } while (preCommand);
+    }
+
+    config.projects[name] = {
+        path,
+        command,
+        preCommands: preCommands.length > 0 ? preCommands : undefined
+    };
 
     // 询问是否添加到平台
     const addToPlatform = await question( rl, '是否添加到平台? (y/N): ' );
@@ -285,7 +345,7 @@ async function main() {
         // 启动所有项目
         const processes = [];
         for ( const project of projectsToStart ) {
-            const proc = startProject( project, config );
+            const proc = await startProject( project, config );
             if ( proc ) processes.push( proc );
 
             // 稍微延迟启动下一个项目，避免端口冲突等问题
@@ -316,30 +376,92 @@ async function main() {
 }
 
 // 配置模式
-async function configMode( rl, config ) {
-    console.log( '\n\x1b[1m配置模式\x1b[0m' );
-    console.log( '1. 添加新项目' );
-    console.log( '2. 管理平台' );
-    console.log( '0. 退出' );
+async function configMode(rl, config) {
+    console.log('\n\x1b[1m配置模式\x1b[0m');
+    console.log('1. 添加新项目');
+    console.log('2. 编辑现有项目');
+    console.log('3. 管理平台');
+    console.log('0. 退出');
 
-    const choice = await question( rl, '请选择操作: ' );
+    const choice = await question(rl, '请选择操作: ');
 
-    switch ( choice ) {
+    switch (choice) {
         case '1':
-            await addProject( rl, config );
-            await configMode( rl, config );
+            await addProject(rl, config);
+            await configMode(rl, config);
             break;
         case '2':
-            await managePlatforms( rl, config );
-            await configMode( rl, config );
+            await editProject(rl, config);
+            await configMode(rl, config);
+            break;
+        case '3':
+            await managePlatforms(rl, config);
+            await configMode(rl, config);
             break;
         case '0':
             rl.close();
             break;
         default:
-            console.log( '\x1b[31m[错误] 无效选择\x1b[0m' );
-            await configMode( rl, config );
+            console.log('\x1b[31m[错误] 无效选择\x1b[0m');
+            await configMode(rl, config);
     }
+}
+
+// 编辑项目
+async function editProject(rl, config) {
+    console.log('\n\x1b[1m编辑项目\x1b[0m');
+
+    // 显示现有项目
+    console.log('\n现有项目:');
+    Object.keys(config.projects).forEach(project => {
+        console.log(`- ${project}`);
+    });
+
+    const projectName = await question(rl, '请选择要编辑的项目: ');
+
+    if (!config.projects[projectName]) {
+        console.log(`\x1b[31m[错误] 项目不存在: ${projectName}\x1b[0m`);
+        return;
+    }
+
+    const projectConfig = config.projects[projectName];
+    console.log(`\n当前配置:`);
+    console.log(`- 路径: ${projectConfig.path}`);
+    console.log(`- 命令: ${projectConfig.command}`);
+    console.log(`- 前置命令: ${projectConfig.preCommands ? projectConfig.preCommands.join(', ') : '无'}`);
+
+    const editPath = await question(rl, `新路径 (当前: ${projectConfig.path}, 留空保持不变): `);
+    const editCommand = await question(rl, `新启动命令 (当前: ${projectConfig.command}, 留空保持不变): `);
+
+    const editPreCommands = await question(rl, '是否编辑前置命令? (y/N): ');
+
+    let preCommands = projectConfig.preCommands || [];
+
+    if (editPreCommands.toLowerCase() === 'y') {
+        console.log('请输入前置命令，每行一条，输入空行结束：');
+        if (preCommands.length > 0) {
+            console.log('当前前置命令:');
+            preCommands.forEach((cmd, i) => console.log(`${i+1}. ${cmd}`));
+        }
+
+        preCommands = [];
+        let preCommand;
+        do {
+            preCommand = await question(rl, '> ');
+            if (preCommand) {
+                preCommands.push(preCommand);
+            }
+        } while (preCommand);
+    }
+
+    config.projects[projectName] = {
+        path: editPath || projectConfig.path,
+        command: editCommand || projectConfig.command,
+        preCommands: preCommands.length > 0 ? preCommands : undefined
+    };
+
+    saveConfig(config);
+    console.log(`\x1b[32m[成功] 已更新项目: ${projectName}\x1b[0m`);
 }
 
 main().catch( err => {

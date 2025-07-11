@@ -55,7 +55,12 @@
         },
         "t1_api": {
             "path": "/Users/zhangyu/work/ttzz/t1-api",
-            "command": "pnpm run dev"
+            "command": "pnpm run dev",
+            "preCommands": [
+                "ssh -l zy -NL 53748:localhost:53748 -p 58274 test-tx-01.tintan.net",
+                "ssh -l zy -NL 59284:localhost:59284 -p 58274 test-tx-01.tintan.net",
+                "ssh -l zy -NL 57236:localhost:57236 -p 58274 test-tx-01.tintan.net"
+            ]
         },
         "t1_api_v2": {
             "path": "/Users/zhangyu/work/ttzz/t1-api-v2",
