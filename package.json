@@ -1,0 +1,17 @@
+{
+    "name": "project-starter",
+    "version": "1.0.1",
+    "description": "一键启动多个项目的命令行工具",
+    "main": "index.js",
+    "bin": {
+        "project-starter": "./index.js"
+    },
+    "keywords": [
+        "project",
+        "launcher",
+        "vue",
+        "node"
+    ],
+    "author": "zhangyu",
+    "license": "ISC"
+}

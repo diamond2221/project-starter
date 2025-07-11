@@ -1,0 +1,85 @@
+{
+    "platforms": {
+        "t1Pro": [
+            "t1_pro_api_v2",
+            "t1_pro_api",
+            "t1_pro_cpm_web",
+            "t1_pro_app",
+            "t1_pro_main",
+            "t1_pro_v3",
+            "t1_pro_zy",
+            "t1_pro_print"
+        ],
+        "t1": [
+            "t1_api",
+            "t1_api_v2",
+            "t1_app",
+            "t1_main",
+            "t1_v3",
+            "t1_zy",
+            "t1_print"
+        ]
+    },
+    "projects": {
+        "t1_pro_cpm_web": {
+            "path": "/Users/zhangyu/work/TTJJ/frontends/cpm-web",
+            "command": "pnpm run dev"
+        },
+        "t1_pro_app": {
+            "path": "/Users/zhangyu/work/TTJJ/frontends/vue3-app",
+            "command": "pnpm run dev:h5"
+        },
+        "t1_pro_main": {
+            "path": "/Users/zhangyu/work/TTJJ/frontends/t1-main",
+            "command": "pnpm run serve"
+        },
+        "t1_pro_v3": {
+            "path": "/Users/zhangyu/work/TTJJ/frontends/vue3-v3",
+            "command": "pnpm run dev"
+        },
+        "t1_pro_zy": {
+            "path": "/Users/zhangyu/work/TTJJ/frontends/vue3-zy",
+            "command": "pnpm run dev"
+        },
+        "t1_pro_print": {
+            "path": "/Users/zhangyu/work/TTJJ/frontends/print",
+            "command": "pnpm run serve"
+        },
+        "t1_pro_api": {
+            "path": "/Users/zhangyu/work/TTJJ/backends/t1-api",
+            "command": "pnpm run dev"
+        },
+        "t1_pro_api_v2": {
+            "path": "/Users/zhangyu/work/TTJJ/backends/t1-api-v2",
+            "command": "pnpm run start:dev"
+        },
+        "t1_api": {
+            "path": "/Users/zhangyu/work/ttzz/t1-api",
+            "command": "pnpm run dev"
+        },
+        "t1_api_v2": {
+            "path": "/Users/zhangyu/work/ttzz/t1-api-v2",
+            "command": "pnpm run start:dev"
+        },
+        "t1_app": {
+            "path": "/Users/zhangyu/work/ttzz/ttzzerp-app",
+            "command": "pnpm run dev:h5"
+        },
+        "t1_main": {
+            "path": "/Users/zhangyu/work/ttzz/t1",
+            "command": "pnpm run serve"
+        },
+        "t1_v3": {
+            "path": "/Users/zhangyu/work/ttzz/ttzzerp-vue3",
+            "command": "pnpm run dev"
+        },
+        "t1_zy": {
+            "path": "/Users/zhangyu/work/ttzz/ttzzerp-v3-zy",
+            "command": "pnpm run dev"
+        },
+        "t1_print": {
+            "path": "/Users/zhangyu/work/ttzz/ttzzerp-print",
+            "command": "pnpm run serve"
+        }
+    }
+}
