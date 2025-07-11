@@ -154,23 +154,51 @@ async function startProject(projectName, config) {
         shell: true
     });
 
-    // 给进程着色输出
-    const colors = ['\x1b[32m', '\x1b[33m', '\x1b[34m', '\x1b[35m', '\x1b[36m'];
-    const color = colors[Math.floor( Math.random() * colors.length )];
+    // 给进程着色输出 - 为每个项目分配固定颜色而不是随机颜色
+    const projectColors = {
+        // 可以根据项目名称分配固定颜色
+    };
 
-    process.stdout.on( 'data', ( data ) => {
-        console.log( `${color}[${projectName}] ${data.toString().trim()}\x1b[0m` );
-    } );
+    // 使用项目名称的哈希值来确定颜色，这样同一个项目每次都是相同颜色
+    const colors = ['\x1b[32m', '\x1b[33m', '\x1b[34m', '\x1b[35m', '\x1b[36m', '\x1b[90m', '\x1b[94m', '\x1b[96m'];
+    const colorIndex = Math.abs(projectName.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0)) % colors.length;
+    const color = projectColors[projectName] || colors[colorIndex];
 
-    process.stderr.on( 'data', ( data ) => {
-        console.error( `\x1b[31m[${projectName} 错误] ${data.toString().trim()}\x1b[0m` );
-    } );
+    // 用于检测是否为编译信息的正则表达式
+    const compilePatterns = [
+        /webpack\.Progress/i,
+        /building/i,
+        /modules/i,
+        /compiled/i,
+        /compiling/i,
+        /bundling/i,
+        /chunk/i
+    ];
 
-    process.on( 'close', ( code ) => {
-        if ( code !== 0 ) {
-            console.log( `\x1b[31m[${projectName}] 进程退出，退出码 ${code}\x1b[0m` );
+    process.stdout.on('data', (data) => {
+        console.log(`${color}[${projectName}] ${data.toString().trim()}\x1b[0m`);
+    });
+
+    process.stderr.on('data', (data) => {
+        const output = data.toString().trim();
+
+        // 检查是否为编译信息而非真正的错误
+        const isCompileInfo = compilePatterns.some(pattern => pattern.test(output));
+
+        if (isCompileInfo) {
+            // 使用与标准输出相同的颜色显示编译信息
+            console.log(`${color}[${projectName}] ${output}\x1b[0m`);
+        } else {
+            // 真正的错误使用红色
+            console.error(`\x1b[31m[${projectName} 错误] ${output}\x1b[0m`);
         }
-    } );
+    });
+
+    process.on('close', (code) => {
+        if (code !== 0) {
+            console.log(`\x1b[31m[${projectName}] 进程退出，退出码 ${code}\x1b[0m`);
+        }
+    });
 
     return process;
 }
