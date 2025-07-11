@@ -61,43 +61,78 @@ async function startProject(projectName, config) {
         return null;
     }
 
+    // 执行前置命令的通用函数
+    async function executeCommand(command, type) {
+        console.log(`\x1b[36m[${type}] ${command}\x1b[0m`);
+
+        // 检查命令是否需要在后台运行（以 & 结尾）
+        const isBackgroundCommand = command.trim().endsWith('&');
+        const actualCommand = isBackgroundCommand ? command.trim().slice(0, -1).trim() : command;
+
+        // 将命令拆分为主命令和参数
+        const [cmd, ...args] = actualCommand.split(' ');
+
+        try {
+            // 设置超时时间（默认10秒）
+            const TIMEOUT = 10000; // 10秒
+
+            // 创建一个可以被超时的Promise
+            const commandPromise = new Promise((resolve, reject) => {
+                const result = spawn(cmd, args, {
+                    cwd: projectPath,
+                    stdio: 'inherit',
+                    shell: true,
+                    detached: isBackgroundCommand // 如果是后台命令，设置为分离模式
+                });
+
+                if (isBackgroundCommand) {
+                    // 后台命令立即解析，不等待
+                    result.unref(); // 允许父进程独立于子进程退出
+                    console.log(`\x1b[36m[后台运行] ${command}\x1b[0m`);
+                    resolve(0);
+                    return;
+                }
+
+                result.on('close', code => {
+                    if (code === 0) {
+                        resolve(code);
+                    } else {
+                        console.log(`\x1b[31m[警告] ${type}退出码: ${code}\x1b[0m`);
+                        resolve(code); // 即使失败也继续执行
+                    }
+                });
+
+                result.on('error', err => {
+                    console.error(`\x1b[31m[错误] ${type}失败: ${err.message}\x1b[0m`);
+                    resolve(1); // 即使失败也继续执行
+                });
+            });
+
+            // 创建一个超时Promise
+            const timeoutPromise = new Promise(resolve => {
+                setTimeout(() => {
+                    console.log(`\x1b[33m[警告] ${type}执行超时，继续下一步\x1b[0m`);
+                    resolve('timeout');
+                }, TIMEOUT);
+            });
+
+            // 竞争Promise，哪个先完成就返回哪个
+            const result = await Promise.race([commandPromise, timeoutPromise]);
+
+            if (result === 'timeout') {
+                console.log(`\x1b[33m[警告] 命令可能在后台运行: ${command}\x1b[0m`);
+            }
+        } catch (error) {
+            console.error(`\x1b[31m[错误] 执行命令失败: ${error.message}\x1b[0m`);
+        }
+    }
+
     // 执行全局前置命令
     if (config.globalPreCommands && config.globalPreCommands.length > 0) {
         console.log(`\x1b[36m[准备] ${projectName}: 执行全局前置命令\x1b[0m`);
 
         for (const preCommand of config.globalPreCommands) {
-            console.log(`\x1b[36m[全局前置命令] ${preCommand}\x1b[0m`);
-
-            // 将命令拆分为主命令和参数
-            const [cmd, ...args] = preCommand.split(' ');
-
-            try {
-                // 同步执行前置命令
-                const result = spawn(cmd, args, {
-                    cwd: projectPath,
-                    stdio: 'inherit',
-                    shell: true
-                });
-
-                // 等待命令执行完成
-                await new Promise((resolve, reject) => {
-                    result.on('close', code => {
-                        if (code === 0) {
-                            resolve();
-                        } else {
-                            console.log(`\x1b[31m[警告] 全局前置命令退出码: ${code}\x1b[0m`);
-                            resolve(); // 即使失败也继续执行
-                        }
-                    });
-
-                    result.on('error', err => {
-                        console.error(`\x1b[31m[错误] 全局前置命令失败: ${err.message}\x1b[0m`);
-                        resolve(); // 即使失败也继续执行
-                    });
-                });
-            } catch (error) {
-                console.error(`\x1b[31m[错误] 执行全局前置命令失败: ${error.message}\x1b[0m`);
-            }
+            await executeCommand(preCommand, "全局前置命令");
         }
     }
 
@@ -106,38 +141,7 @@ async function startProject(projectName, config) {
         console.log(`\x1b[36m[准备] ${projectName}: 执行项目特定前置命令\x1b[0m`);
 
         for (const preCommand of projectConfig.preCommands) {
-            console.log(`\x1b[36m[项目特定前置命令] ${preCommand}\x1b[0m`);
-
-            // 将命令拆分为主命令和参数
-            const [cmd, ...args] = preCommand.split(' ');
-
-            try {
-                // 同步执行前置命令
-                const result = spawn(cmd, args, {
-                    cwd: projectPath,
-                    stdio: 'inherit',
-                    shell: true
-                });
-
-                // 等待命令执行完成
-                await new Promise((resolve, reject) => {
-                    result.on('close', code => {
-                        if (code === 0) {
-                            resolve();
-                        } else {
-                            console.log(`\x1b[31m[警告] 项目特定前置命令退出码: ${code}\x1b[0m`);
-                            resolve(); // 即使失败也继续执行
-                        }
-                    });
-
-                    result.on('error', err => {
-                        console.error(`\x1b[31m[错误] 项目特定前置命令失败: ${err.message}\x1b[0m`);
-                        resolve(); // 即使失败也继续执行
-                    });
-                });
-            } catch (error) {
-                console.error(`\x1b[31m[错误] 执行项目特定前置命令失败: ${error.message}\x1b[0m`);
-            }
+            await executeCommand(preCommand, "项目特定前置命令");
         }
     }
 
@@ -217,6 +221,7 @@ async function addProject(rl, config) {
     const preCommands = [];
     if (hasPreCommands.toLowerCase() === 'y') {
         console.log('请输入前置命令，每行一条，输入空行结束：');
+        console.log('提示: 在命令末尾添加"&"表示该命令在后台运行，不等待其完成');
 
         let preCommand;
         do {
@@ -486,6 +491,7 @@ async function configMode(rl, config) {
 async function configGlobalPreCommands(rl, config) {
     console.log('\n\x1b[1m配置全局前置命令\x1b[0m');
     console.log('这些命令将在启动每个项目前执行');
+    console.log('提示: 在命令末尾添加"&"表示该命令在后台运行，不等待其完成');
 
     // 显示当前全局前置命令
     if (config.globalPreCommands && config.globalPreCommands.length > 0) {
