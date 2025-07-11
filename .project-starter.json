@@ -22,7 +22,7 @@
     },
     "projects": {
         "t1_pro_cpm_web": {
-            "path": "/Users/zhangyu/work/TTJJ/frontends/cpm-web",
+            "path": "/Users/zhangyu/work/TTJJ/frontends/cpm_web",
             "command": "pnpm run dev"
         },
         "t1_pro_app": {
