@@ -11,7 +11,9 @@ const CONFIG_FILE = path.join( os.homedir(), '.project-starter.json' );
 
 // 默认配置
 const defaultConfig = {
-
+  projects: {},
+  platforms: {},
+  globalPreCommands: [] // 添加全局前置命令配置
 };
 
 // 加载或创建配置文件
@@ -59,12 +61,12 @@ async function startProject(projectName, config) {
         return null;
     }
 
-    // 执行前置命令
-    if (projectConfig.preCommands && projectConfig.preCommands.length > 0) {
-        console.log(`\x1b[36m[准备] ${projectName}: 执行前置命令\x1b[0m`);
+    // 执行全局前置命令
+    if (config.globalPreCommands && config.globalPreCommands.length > 0) {
+        console.log(`\x1b[36m[准备] ${projectName}: 执行全局前置命令\x1b[0m`);
 
-        for (const preCommand of projectConfig.preCommands) {
-            console.log(`\x1b[36m[前置命令] ${preCommand}\x1b[0m`);
+        for (const preCommand of config.globalPreCommands) {
+            console.log(`\x1b[36m[全局前置命令] ${preCommand}\x1b[0m`);
 
             // 将命令拆分为主命令和参数
             const [cmd, ...args] = preCommand.split(' ');
@@ -83,18 +85,58 @@ async function startProject(projectName, config) {
                         if (code === 0) {
                             resolve();
                         } else {
-                            console.log(`\x1b[31m[警告] 前置命令退出码: ${code}\x1b[0m`);
+                            console.log(`\x1b[31m[警告] 全局前置命令退出码: ${code}\x1b[0m`);
                             resolve(); // 即使失败也继续执行
                         }
                     });
 
                     result.on('error', err => {
-                        console.error(`\x1b[31m[错误] 前置命令失败: ${err.message}\x1b[0m`);
+                        console.error(`\x1b[31m[错误] 全局前置命令失败: ${err.message}\x1b[0m`);
                         resolve(); // 即使失败也继续执行
                     });
                 });
             } catch (error) {
-                console.error(`\x1b[31m[错误] 执行前置命令失败: ${error.message}\x1b[0m`);
+                console.error(`\x1b[31m[错误] 执行全局前置命令失败: ${error.message}\x1b[0m`);
+            }
+        }
+    }
+
+    // 执行项目特定前置命令
+    if (projectConfig.preCommands && projectConfig.preCommands.length > 0) {
+        console.log(`\x1b[36m[准备] ${projectName}: 执行项目特定前置命令\x1b[0m`);
+
+        for (const preCommand of projectConfig.preCommands) {
+            console.log(`\x1b[36m[项目特定前置命令] ${preCommand}\x1b[0m`);
+
+            // 将命令拆分为主命令和参数
+            const [cmd, ...args] = preCommand.split(' ');
+
+            try {
+                // 同步执行前置命令
+                const result = spawn(cmd, args, {
+                    cwd: projectPath,
+                    stdio: 'inherit',
+                    shell: true
+                });
+
+                // 等待命令执行完成
+                await new Promise((resolve, reject) => {
+                    result.on('close', code => {
+                        if (code === 0) {
+                            resolve();
+                        } else {
+                            console.log(`\x1b[31m[警告] 项目特定前置命令退出码: ${code}\x1b[0m`);
+                            resolve(); // 即使失败也继续执行
+                        }
+                    });
+
+                    result.on('error', err => {
+                        console.error(`\x1b[31m[错误] 项目特定前置命令失败: ${err.message}\x1b[0m`);
+                        resolve(); // 即使失败也继续执行
+                    });
+                });
+            } catch (error) {
+                console.error(`\x1b[31m[错误] 执行项目特定前置命令失败: ${error.message}\x1b[0m`);
             }
         }
     }
@@ -381,6 +423,7 @@ async function configMode(rl, config) {
     console.log('1. 添加新项目');
     console.log('2. 编辑现有项目');
     console.log('3. 管理平台');
+    console.log('4. 设置全局前置命令'); // 新增选项
     console.log('0. 退出');
 
     const choice = await question(rl, '请选择操作: ');
@@ -398,6 +441,10 @@ async function configMode(rl, config) {
             await managePlatforms(rl, config);
             await configMode(rl, config);
             break;
+        case '4':
+            await configGlobalPreCommands(rl, config);
+            await configMode(rl, config);
+            break;
         case '0':
             rl.close();
             break;
@@ -405,6 +452,35 @@ async function configMode(rl, config) {
             console.log('\x1b[31m[错误] 无效选择\x1b[0m');
             await configMode(rl, config);
     }
+}
+
+// 配置全局前置命令
+async function configGlobalPreCommands(rl, config) {
+    console.log('\n\x1b[1m配置全局前置命令\x1b[0m');
+    console.log('这些命令将在启动每个项目前执行');
+
+    // 显示当前全局前置命令
+    if (config.globalPreCommands && config.globalPreCommands.length > 0) {
+        console.log('\n当前全局前置命令:');
+        config.globalPreCommands.forEach((cmd, i) => console.log(`${i+1}. ${cmd}`));
+    } else {
+        console.log('\n当前没有全局前置命令');
+    }
+
+    console.log('\n请输入新的全局前置命令，每行一条，输入空行结束：');
+
+    const globalPreCommands = [];
+    let preCommand;
+    do {
+        preCommand = await question(rl, '> ');
+        if (preCommand) {
+            globalPreCommands.push(preCommand);
+        }
+    } while (preCommand);
+
+    config.globalPreCommands = globalPreCommands;
+    saveConfig(config);
+    console.log(`\x1b[32m[成功] 已更新全局前置命令\x1b[0m`);
 }
 
 // 编辑项目

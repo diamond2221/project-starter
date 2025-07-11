@@ -86,5 +86,8 @@
             "path": "/Users/zhangyu/work/ttzz/ttzzerp-print",
             "command": "pnpm run serve"
         }
-    }
+    },
+    "globalPreCommands": [
+        "pnpm install"
+    ]
 }
