@@ -1,6 +1,6 @@
 {
     "name": "project-starter",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "description": "一键启动多个项目的命令行工具",
     "main": "index.js",
     "bin": {

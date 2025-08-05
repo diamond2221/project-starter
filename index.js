@@ -61,6 +61,8 @@ async function startProject(projectName, config) {
         return null;
     }
 
+    console.log(`\x1b[36m[${projectName}] 开始启动流程\x1b[0m`);
+
     // 执行前置命令的通用函数
     async function executeCommand(command, type) {
         console.log(`\x1b[36m[${type}] ${command}\x1b[0m`);
@@ -129,24 +131,24 @@ async function startProject(projectName, config) {
 
     // 执行全局前置命令
     if (config.globalPreCommands && config.globalPreCommands.length > 0) {
-        console.log(`\x1b[36m[准备] ${projectName}: 执行全局前置命令\x1b[0m`);
+        console.log(`\x1b[36m[${projectName}] 执行全局前置命令\x1b[0m`);
 
         for (const preCommand of config.globalPreCommands) {
-            await executeCommand(preCommand, "全局前置命令");
+            await executeCommand(preCommand, `${projectName} 全局前置命令`);
         }
     }
 
     // 执行项目特定前置命令
     if (projectConfig.preCommands && projectConfig.preCommands.length > 0) {
-        console.log(`\x1b[36m[准备] ${projectName}: 执行项目特定前置命令\x1b[0m`);
+        console.log(`\x1b[36m[${projectName}] 执行项目特定前置命令\x1b[0m`);
 
         for (const preCommand of projectConfig.preCommands) {
-            await executeCommand(preCommand, "项目特定前置命令");
+            await executeCommand(preCommand, `${projectName} 项目前置命令`);
         }
     }
 
     const command = projectConfig.command;
-    console.log(`\x1b[36m[启动] ${projectName}: ${command} (路径: ${projectPath})\x1b[0m`);
+    console.log(`\x1b[36m[${projectName}] 执行启动命令: ${command}\x1b[0m`);
 
     // 将命令拆分为主命令和参数
     const [cmd, ...args] = command.split(' ');
@@ -201,8 +203,15 @@ async function startProject(projectName, config) {
     process.on('close', (code) => {
         if (code !== 0) {
             console.log(`\x1b[31m[${projectName}] 进程退出，退出码 ${code}\x1b[0m`);
+        } else {
+            console.log(`\x1b[90m[${projectName}] 进程正常退出\x1b[0m`);
         }
     });
+
+    // 添加启动成功的日志
+    setTimeout(() => {
+        console.log(`\x1b[32m[${projectName}] 项目进程已启动\x1b[0m`);
+    }, 100);
 
     return process;
 }
@@ -415,25 +424,59 @@ async function main() {
             return;
         }
 
-        console.log( `\n\x1b[1m正在启动平台 ${platformName} 的项目: ${projectsToStart.join( ', ' )}\x1b[0m\n` );
+        console.log( `\n\x1b[1m正在并发启动平台 ${platformName} 的项目: ${projectsToStart.join( ', ' )}\x1b[0m\n` );
 
-        // 启动所有项目
+        // 并发启动所有项目
         const processes = [];
-        for ( const project of projectsToStart ) {
-            const proc = await startProject( project, config );
-            if ( proc ) processes.push( proc );
 
-            // 稍微延迟启动下一个项目，避免端口冲突等问题
-            await new Promise( resolve => setTimeout( resolve, 2000 ) );
-        }
+        // 创建所有项目的启动Promise
+        const startPromises = projectsToStart.map(async (project, index) => {
+            // 为每个项目添加一个小的延迟，避免同时启动导致的资源竞争
+            await new Promise(resolve => setTimeout(resolve, index * 500)); // 每个项目延迟500ms
+
+            console.log(`\x1b[36m[并发启动] 开始启动项目: ${project}\x1b[0m`);
+            const proc = await startProject(project, config);
+
+            if (proc) {
+                console.log(`\x1b[32m[并发启动] 项目 ${project} 启动成功\x1b[0m`);
+                return { project, process: proc };
+            } else {
+                console.log(`\x1b[31m[并发启动] 项目 ${project} 启动失败\x1b[0m`);
+                return null;
+            }
+        });
+
+        // 等待所有项目启动完成
+        console.log(`\x1b[36m[并发启动] 等待所有项目启动完成...\x1b[0m`);
+        const results = await Promise.allSettled(startPromises);
+
+        // 收集成功启动的进程
+        results.forEach((result, index) => {
+            if (result.status === 'fulfilled' && result.value) {
+                processes.push(result.value.process);
+            } else if (result.status === 'rejected') {
+                console.error(`\x1b[31m[并发启动] 项目 ${projectsToStart[index]} 启动异常: ${result.reason}\x1b[0m`);
+            }
+        });
 
         if ( processes.length === 0 ) {
             console.log( '\x1b[33m[警告] 没有启动任何项目\x1b[0m' );
             return;
         }
 
-        console.log( `\n\x1b[32m成功启动 ${processes.length} 个项目\x1b[0m` );
-        console.log( '\x1b[33m按 Ctrl+C 可以关闭所有项目\x1b[0m' );
+        console.log( `\n\x1b[32m✅ 并发启动完成！成功启动 ${processes.length} 个项目\x1b[0m` );
+        console.log( `\x1b[36m📊 启动统计: ${results.filter(r => r.status === 'fulfilled' && r.value).length}/${projectsToStart.length} 个项目启动成功\x1b[0m` );
+        console.log( '\x1b[33m💡 按 Ctrl+C 可以关闭所有项目\x1b[0m' );
+
+        // 显示启动失败的项目
+        const failedProjects = results
+            .map((result, index) => ({ result, project: projectsToStart[index] }))
+            .filter(item => item.result.status === 'rejected' || !item.result.value)
+            .map(item => item.project);
+
+        if (failedProjects.length > 0) {
+            console.log( `\x1b[31m❌ 启动失败的项目: ${failedProjects.join(', ')}\x1b[0m` );
+        }
 
         // 处理终止信号
         process.on( 'SIGINT', () => {
