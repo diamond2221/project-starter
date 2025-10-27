@@ -1,13 +1,36 @@
 #!/usr/bin/env node
 
-const { spawn } = require( 'child_process' );
+const { spawn, exec } = require( 'child_process' );
 const path = require( 'path' );
 const fs = require( 'fs' );
 const readline = require( 'readline' );
 const os = require( 'os' );
+const { Transform } = require( 'stream' );
 
 // 配置文件路径
 const CONFIG_FILE = path.join( os.homedir(), '.project-starter.json' );
+
+// 内存优化配置
+const MEMORY_CONFIG = {
+    MAX_BUFFER_SIZE: 10 * 1024 * 1024, // 10MB 缓冲区限制
+    LINE_RETENTION_COUNT: 1000, // 保留最近1000行日志
+    STARTUP_DELAY_MS: 1000, // 进程启动间隔1秒
+    MEMORY_CHECK_INTERVAL_MS: 30000 // 30秒检查一次内存
+};
+
+// 日志配置
+const LOG_CONFIG = {
+    MODES: {
+        CONSOLE: 'console',  // 终端输出（默认）
+        FILE: 'file',        // 文件输出（最低内存）
+        BOTH: 'both'         // 同时输出
+    },
+    DEFAULT_MODE: 'console',
+    DEFAULT_DIR: path.join(process.cwd(), 'logs'),
+    DEFAULT_RETENTION_DAYS: 7,
+    FILE_MAX_SIZE: 50 * 1024 * 1024, // 50MB 单文件
+    HIGH_WATER_MARK: 16 * 1024 // 16KB 写入缓冲
+};
 
 // 默认配置
 const defaultConfig = {
@@ -15,6 +38,142 @@ const defaultConfig = {
   platforms: {},
   globalPreCommands: [] // 添加全局前置命令配置
 };
+
+// 获取格式化的日期字符串
+function getDateString() {
+    const now = new Date();
+    return now.toISOString().split('T')[0].replace(/-/g, '');
+}
+
+// 创建日志目录
+function ensureLogDirectory(platformName, logDir = LOG_CONFIG.DEFAULT_DIR) {
+    const platformLogDir = path.join(logDir, platformName);
+    if (!fs.existsSync(platformLogDir)) {
+        fs.mkdirSync(platformLogDir, { recursive: true });
+    }
+    return platformLogDir;
+}
+
+// 获取日志文件路径
+function getLogFilePath(projectName, platformName, logDir = LOG_CONFIG.DEFAULT_DIR) {
+    const dateStr = getDateString();
+    const platformLogDir = ensureLogDirectory(platformName, logDir);
+    return path.join(platformLogDir, `${projectName}-${dateStr}.log`);
+}
+
+// 获取子进程的内存使用情况（跨平台）
+function getChildProcessMemory(pid) {
+    return new Promise((resolve) => {
+        // macOS 和 Linux
+        if (os.platform() !== 'win32') {
+            exec(`ps -o rss= -p ${pid}`, (error, stdout) => {
+                if (error) {
+                    resolve(0);
+                    return;
+                }
+                // ps 返回的是 KB，转换为字节
+                const rssKB = parseInt(stdout.trim(), 10);
+                resolve(rssKB * 1024);
+            });
+        } else {
+            // Windows
+            exec(`wmic process where processid=${pid} get WorkingSetSize`, (error, stdout) => {
+                if (error) {
+                    resolve(0);
+                    return;
+                }
+                const lines = stdout.trim().split('\n');
+                if (lines.length < 2) {
+                    resolve(0);
+                    return;
+                }
+                const bytes = parseInt(lines[1].trim(), 10);
+                resolve(bytes || 0);
+            });
+        }
+    });
+}
+
+// 获取所有子进程的总内存
+async function getTotalChildProcessesMemory(processes) {
+    let totalMemory = 0;
+
+    for (const proc of processes) {
+        if (proc && proc.pid) {
+            const memory = await getChildProcessMemory(proc.pid);
+            totalMemory += memory;
+        }
+    }
+
+    return totalMemory;
+}
+
+// 清理旧日志文件
+function cleanOldLogs(platformName, logDir = LOG_CONFIG.DEFAULT_DIR, retentionDays = LOG_CONFIG.DEFAULT_RETENTION_DAYS) {
+    const platformLogDir = path.join(logDir, platformName);
+
+    if (!fs.existsSync(platformLogDir)) {
+        return;
+    }
+
+    const now = Date.now();
+    const retentionMs = retentionDays * 24 * 60 * 60 * 1000;
+
+    try {
+        const files = fs.readdirSync(platformLogDir);
+
+        files.forEach(file => {
+            const filePath = path.join(platformLogDir, file);
+            const stats = fs.statSync(filePath);
+
+            // 删除超过保留天数的日志文件
+            if (now - stats.mtimeMs > retentionMs) {
+                fs.unlinkSync(filePath);
+                console.log(`\x1b[90m[日志清理] 删除旧日志: ${file}\x1b[0m`);
+            }
+        });
+    } catch (error) {
+        console.error(`\x1b[31m[错误] 清理日志失败: ${error.message}\x1b[0m`);
+    }
+}
+
+// 流量控制的Transform Stream，限制内存占用
+class ThrottledOutputStream extends Transform {
+    constructor(options = {}) {
+        super(options);
+        this.lineCount = 0;
+        this.maxLines = options.maxLines || MEMORY_CONFIG.LINE_RETENTION_COUNT;
+        this.buffer = [];
+    }
+
+    _transform(chunk, encoding, callback) {
+        const lines = chunk.toString().split('\n');
+
+        for (const line of lines) {
+            if (line.trim()) {
+                this.buffer.push(line);
+                this.lineCount++;
+
+                // 超过限制时，丢弃旧数据
+                if (this.lineCount > this.maxLines) {
+                    this.buffer.shift();
+                    this.lineCount--;
+                }
+            }
+        }
+
+        // 直接输出，不缓存
+        this.push(chunk);
+        callback();
+    }
+
+    _flush(callback) {
+        // 清空缓冲区
+        this.buffer = [];
+        this.lineCount = 0;
+        callback();
+    }
+}
 
 // 加载或创建配置文件
 function loadConfig() {
@@ -45,7 +204,8 @@ function saveConfig( config ) {
 }
 
 // 启动单个项目
-async function startProject(projectName, config) {
+async function startProject(projectName, config, options = {}) {
+    const { logMode = LOG_CONFIG.DEFAULT_MODE, logDir = LOG_CONFIG.DEFAULT_DIR, platformName = 'default' } = options;
     const projectConfig = config.projects[projectName];
 
     if (!projectConfig) {
@@ -153,22 +313,25 @@ async function startProject(projectName, config) {
     // 将命令拆分为主命令和参数
     const [cmd, ...args] = command.split(' ');
 
-    // 使用 spawn 启动项目并保持输出流
+    // 根据日志模式决定 stdio 配置
+    let stdioConfig = 'pipe'; // 默认使用 pipe
+
+    // file 模式下使用 inherit 以获得最低内存占用
+    if (logMode === LOG_CONFIG.MODES.FILE) {
+        stdioConfig = 'inherit';
+    }
+
+    // 使用 spawn 启动项目
     const process = spawn(cmd, args, {
         cwd: projectPath,
-        stdio: 'pipe',
+        stdio: stdioConfig,
         shell: true
     });
 
-    // 给进程着色输出 - 为每个项目分配固定颜色而不是随机颜色
-    const projectColors = {
-        // 可以根据项目名称分配固定颜色
-    };
-
-    // 使用项目名称的哈希值来确定颜色，这样同一个项目每次都是相同颜色
+    // 给进程着色输出 - 为每个项目分配固定颜色
     const colors = ['\x1b[32m', '\x1b[33m', '\x1b[34m', '\x1b[35m', '\x1b[36m', '\x1b[90m', '\x1b[94m', '\x1b[96m'];
     const colorIndex = Math.abs(projectName.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0)) % colors.length;
-    const color = projectColors[projectName] || colors[colorIndex];
+    const color = colors[colorIndex];
 
     // 用于检测是否为编译信息的正则表达式
     const compilePatterns = [
@@ -181,24 +344,78 @@ async function startProject(projectName, config) {
         /chunk/i
     ];
 
-    process.stdout.on('data', (data) => {
-        console.log(`${color}[${projectName}] ${data.toString().trim()}\x1b[0m`);
-    });
+    // 如果是 console 或 both 模式，处理输出
+    if (logMode === LOG_CONFIG.MODES.CONSOLE || logMode === LOG_CONFIG.MODES.BOTH) {
+        // 创建流量控制的Transform Stream
+        const stdoutThrottle = new ThrottledOutputStream();
+        const stderrThrottle = new ThrottledOutputStream();
 
-    process.stderr.on('data', (data) => {
-        const output = data.toString().trim();
+        // 使用pipe连接，避免在内存中累积所有数据
+        process.stdout.pipe(stdoutThrottle).on('data', (data) => {
+            const lines = data.toString().split('\n').filter(line => line.trim());
+            lines.forEach(line => {
+                console.log(`${color}[${projectName}] ${line}\x1b[0m`);
+            });
+        });
 
-        // 检查是否为编译信息而非真正的错误
-        const isCompileInfo = compilePatterns.some(pattern => pattern.test(output));
+        process.stderr.pipe(stderrThrottle).on('data', (data) => {
+            const lines = data.toString().split('\n').filter(line => line.trim());
 
-        if (isCompileInfo) {
-            // 使用与标准输出相同的颜色显示编译信息
-            console.log(`${color}[${projectName}] ${output}\x1b[0m`);
-        } else {
-            // 真正的错误使用红色
-            console.error(`\x1b[31m[${projectName} 错误] ${output}\x1b[0m`);
+            lines.forEach(output => {
+                const isCompileInfo = compilePatterns.some(pattern => pattern.test(output));
+
+                if (isCompileInfo) {
+                    console.log(`${color}[${projectName}] ${output}\x1b[0m`);
+                } else {
+                    console.error(`\x1b[31m[${projectName} 错误] ${output}\x1b[0m`);
+                }
+            });
+        });
+    }
+
+    // 如果是 file 或 both 模式，写入日志文件
+    if (logMode === LOG_CONFIG.MODES.FILE || logMode === LOG_CONFIG.MODES.BOTH) {
+        const logFilePath = getLogFilePath(projectName, platformName, logDir);
+
+        // 创建日志文件写入流
+        const logStream = fs.createWriteStream(logFilePath, {
+            flags: 'a', // 追加模式
+            encoding: 'utf8',
+            highWaterMark: LOG_CONFIG.HIGH_WATER_MARK
+        });
+
+        // 记录启动时间和命令
+        const timestamp = new Date().toISOString();
+        logStream.write(`\n${'='.repeat(80)}\n`);
+        logStream.write(`[${timestamp}] 项目启动: ${projectName}\n`);
+        logStream.write(`命令: ${command}\n`);
+        logStream.write(`路径: ${projectPath}\n`);
+        logStream.write(`${'='.repeat(80)}\n\n`);
+
+        // 将输出写入文件（仅在 both 模式下，file 模式使用 inherit）
+        if (logMode === LOG_CONFIG.MODES.BOTH) {
+            process.stdout.on('data', (data) => {
+                logStream.write(`[STDOUT] ${data.toString()}`);
+            });
+
+            process.stderr.on('data', (data) => {
+                logStream.write(`[STDERR] ${data.toString()}`);
+            });
         }
-    });
+
+        // 进程关闭时关闭日志流
+        process.on('close', (code) => {
+            const endTimestamp = new Date().toISOString();
+            logStream.write(`\n[${endTimestamp}] 进程退出，退出码: ${code}\n`);
+            logStream.end();
+        });
+
+        // 显示日志文件路径
+        if (logMode === LOG_CONFIG.MODES.FILE) {
+            console.log(`\x1b[36m[${projectName}] 📝 日志文件: ${logFilePath}\x1b[0m`);
+            console.log(`\x1b[90m  查看实时日志: tail -f ${logFilePath}\x1b[0m`);
+        }
+    }
 
     process.on('close', (code) => {
         if (code !== 0) {
@@ -359,13 +576,44 @@ function question( rl, query ) {
     } );
 }
 
+// 解析命令行参数
+function parseArgs(args) {
+    const parsed = {
+        command: null,
+        logMode: LOG_CONFIG.DEFAULT_MODE,
+        logDir: LOG_CONFIG.DEFAULT_DIR,
+        logRetentionDays: LOG_CONFIG.DEFAULT_RETENTION_DAYS
+    };
+
+    // 提取非选项参数（平台/项目名称）
+    const nonOptionArgs = [];
+
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+
+        if (arg.startsWith('--log-mode=')) {
+            parsed.logMode = arg.split('=')[1];
+        } else if (arg.startsWith('--log-dir=')) {
+            parsed.logDir = arg.split('=')[1];
+        } else if (arg.startsWith('--log-retention=')) {
+            parsed.logRetentionDays = parseInt(arg.split('=')[1], 10);
+        } else {
+            nonOptionArgs.push(arg);
+        }
+    }
+
+    parsed.command = nonOptionArgs[0];
+    return parsed;
+}
+
 // 主函数
 async function main() {
     const config = loadConfig();
 
     // 解析命令行参数
-    const args = process.argv.slice( 2 );
-    const command = args[0];
+    const rawArgs = process.argv.slice( 2 );
+    const args = parseArgs(rawArgs);
+    const command = args.command;
 
     // 创建readline接口
     const rl = readline.createInterface( {
@@ -424,18 +672,41 @@ async function main() {
             return;
         }
 
-        console.log( `\n\x1b[1m正在并发启动平台 ${platformName} 的项目: ${projectsToStart.join( ', ' )}\x1b[0m\n` );
+        // 显示日志模式信息
+        const logModeNames = {
+            [LOG_CONFIG.MODES.CONSOLE]: '终端输出（默认）',
+            [LOG_CONFIG.MODES.FILE]: '文件输出（最低内存）',
+            [LOG_CONFIG.MODES.BOTH]: '同时输出'
+        };
+
+        console.log( `\n\x1b[1m正在并发启动平台 ${platformName} 的项目: ${projectsToStart.join( ', ' )}\x1b[0m` );
+        console.log( `\x1b[36m📝 日志模式: ${logModeNames[args.logMode] || args.logMode}\x1b[0m` );
+
+        if (args.logMode !== LOG_CONFIG.MODES.CONSOLE) {
+            console.log( `\x1b[36m📁 日志目录: ${args.logDir}\x1b[0m` );
+        }
+
+        console.log('');
+
+        // 清理旧日志
+        if (args.logMode !== LOG_CONFIG.MODES.CONSOLE) {
+            cleanOldLogs(platformName, args.logDir, args.logRetentionDays);
+        }
 
         // 并发启动所有项目
         const processes = [];
 
         // 创建所有项目的启动Promise
         const startPromises = projectsToStart.map(async (project, index) => {
-            // 为每个项目添加一个小的延迟，避免同时启动导致的资源竞争
-            await new Promise(resolve => setTimeout(resolve, index * 500)); // 每个项目延迟500ms
+            // 为每个项目添加延迟，避免同时启动导致的资源竞争和内存峰值
+            await new Promise(resolve => setTimeout(resolve, index * MEMORY_CONFIG.STARTUP_DELAY_MS));
 
             console.log(`\x1b[36m[并发启动] 开始启动项目: ${project}\x1b[0m`);
-            const proc = await startProject(project, config);
+            const proc = await startProject(project, config, {
+                logMode: args.logMode,
+                logDir: args.logDir,
+                platformName: platformName
+            });
 
             if (proc) {
                 console.log(`\x1b[32m[并发启动] 项目 ${project} 启动成功\x1b[0m`);
@@ -468,6 +739,68 @@ async function main() {
         console.log( `\x1b[36m📊 启动统计: ${results.filter(r => r.status === 'fulfilled' && r.value).length}/${projectsToStart.length} 个项目启动成功\x1b[0m` );
         console.log( '\x1b[33m💡 按 Ctrl+C 可以关闭所有项目\x1b[0m' );
 
+        // 启动内存监控（增强版：包含子进程内存）
+        const memoryMonitor = setInterval(async () => {
+            // 父进程内存
+            const memUsage = process.memoryUsage();
+            const parentRss = memUsage.rss;
+            const heapUsed = memUsage.heapUsed;
+            const heapTotal = memUsage.heapTotal;
+
+            // 子进程内存
+            const childMemory = await getTotalChildProcessesMemory(processes);
+
+            // 总内存 = 父进程 + 所有子进程
+            const totalMemory = parentRss + childMemory;
+
+            // 转换为 MB
+            const parentRssMB = (parentRss / 1024 / 1024).toFixed(2);
+            const childMemoryMB = (childMemory / 1024 / 1024).toFixed(2);
+            const totalMemoryMB = (totalMemory / 1024 / 1024).toFixed(2);
+            const heapUsedMB = (heapUsed / 1024 / 1024).toFixed(2);
+            const heapTotalMB = (heapTotal / 1024 / 1024).toFixed(2);
+            const heapPercent = ((heapUsed / heapTotal) * 100).toFixed(1);
+
+            // 根据总内存使用率选择颜色
+            let statusColor = '\x1b[32m'; // 绿色 - 正常
+            let statusIcon = '✓';
+
+            // 使用总内存作为判断标准（50MB为警告阈值，100MB为危险阈值）
+            const totalThresholdWarning = 50 * 1024 * 1024; // 50MB
+            const totalThresholdDanger = 100 * 1024 * 1024; // 100MB
+
+            if (totalMemory > totalThresholdWarning) {
+                statusColor = '\x1b[33m'; // 黄色 - 警告
+                statusIcon = '⚠';
+            }
+
+            if (totalMemory > totalThresholdDanger) {
+                statusColor = '\x1b[31m'; // 红色 - 危险
+                statusIcon = '✖';
+            }
+
+            // 更醒目的内存监控输出
+            console.log(`\n${statusColor}╭──────────────── 内存监控 ────────────────╮\x1b[0m`);
+            console.log(`${statusColor}│ ${statusIcon} 总内存: ${totalMemoryMB.padStart(8)}MB                │\x1b[0m`);
+            console.log(`${statusColor}│   ├─ 父进程: ${parentRssMB.padStart(8)}MB                │\x1b[0m`);
+            console.log(`${statusColor}│   └─ 子进程: ${childMemoryMB.padStart(8)}MB (${processes.length}个项目)    │\x1b[0m`);
+            console.log(`${statusColor}│                                          │\x1b[0m`);
+            console.log(`${statusColor}│ ${statusIcon} Heap:   ${heapUsedMB.padStart(8)}MB / ${heapTotalMB}MB (${heapPercent}%) │\x1b[0m`);
+
+            // 如果内存超过阈值，显示警告信息
+            if (totalMemory > totalThresholdDanger) {
+                console.log(`${statusColor}│                                          │\x1b[0m`);
+                console.log(`${statusColor}│ ⚠️  总内存使用量过高！建议操作：      │\x1b[0m`);
+                console.log(`${statusColor}│   1. 使用 --log-mode=file 降低内存    │\x1b[0m`);
+                console.log(`${statusColor}│   2. 减少同时启动的项目数量           │\x1b[0m`);
+                console.log(`${statusColor}│   3. 重启释放内存                     │\x1b[0m`);
+            } else if (totalMemory > totalThresholdWarning) {
+                console.log(`${statusColor}│ ℹ️  总内存使用率较高，请注意监控      │\x1b[0m`);
+            }
+
+            console.log(`${statusColor}╰──────────────────────────────────────────╯\x1b[0m\n`);
+        }, MEMORY_CONFIG.MEMORY_CHECK_INTERVAL_MS);
+
         // 显示启动失败的项目
         const failedProjects = results
             .map((result, index) => ({ result, project: projectsToStart[index] }))
@@ -481,6 +814,11 @@ async function main() {
         // 处理终止信号
         process.on( 'SIGINT', () => {
             console.log( '\n\x1b[1m正在关闭所有项目...\x1b[0m' );
+
+            // 清除内存监控定时器
+            clearInterval(memoryMonitor);
+
+            // 终止所有子进程
             processes.forEach( proc => {
                 try {
                     proc.kill();
