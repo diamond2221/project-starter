@@ -1,0 +1,7 @@
+# Claude Code 运行时文件
+.claude/context-*.json
+.claude/operations-log.md
+.claude/review-report.md
+.claude/codex-sessions.json
+.claude/coding-progress.json
+.claude/structured-request.json
