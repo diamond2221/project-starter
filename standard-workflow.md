@@ -17,10 +17,10 @@ tips: /standard-workflow <task_description>
 # ⚡ 4步执行流程
 
 ## ```
-1. sequential-thinking           → 理解目标/风险/验证
-2. Codex 收集上下文              → .claude/context-*.json
-3. shrimp-task-manager 规划     → 任务拆解
-4. 主AI 编码 + Codex 审查        → 小步实现 + 质量验证
+1. Claude: sequential-thinking → 理解目标/风险/验证
+2. Codex/Gemini: 收集上下文 → .claude/context-*.json
+3. Claude: shrimp-task-manager 规划 → 任务拆解
+4. Claude: 编码实现 + Codex/Gemini: 审查 → 小步实现 + 质量验证
 ## ```
 
 ---

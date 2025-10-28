@@ -14,6 +14,8 @@ const CONFIG_FILE = path.join( os.homedir(), '.project-starter.json' );
 const MEMORY_CONFIG = {
     MAX_BUFFER_SIZE: 10 * 1024 * 1024, // 10MB 缓冲区限制
     LINE_RETENTION_COUNT: 1000, // 保留最近1000行日志
+    LOG_RETENTION_WINDOW_MS: 15 * 60 * 1000, // 日志时间窗口：15分钟
+    LOG_CLEANUP_INTERVAL_MS: 30 * 1000, // 清理周期：30秒
     STARTUP_DELAY_MS: 1000, // 进程启动间隔1秒
     MEMORY_CHECK_INTERVAL_MS: 30000 // 30秒检查一次内存
 };
@@ -137,41 +139,94 @@ function cleanOldLogs(platformName, logDir = LOG_CONFIG.DEFAULT_DIR, retentionDa
     }
 }
 
-// 流量控制的Transform Stream，限制内存占用
+// 流量控制的Transform Stream，限制内存占用并支持时间窗口清理
 class ThrottledOutputStream extends Transform {
     constructor(options = {}) {
         super(options);
         this.lineCount = 0;
         this.maxLines = options.maxLines || MEMORY_CONFIG.LINE_RETENTION_COUNT;
+
+        // 时间窗口配置（毫秒），默认15分钟，非正值回退到默认
+        const windowMs = options.retentionWindowMs ?? MEMORY_CONFIG.LOG_RETENTION_WINDOW_MS;
+        this.retentionWindowMs = windowMs > 0 ? windowMs : MEMORY_CONFIG.LOG_RETENTION_WINDOW_MS;
+
+        // 清理周期配置（毫秒），默认30秒，非正值回退到默认
+        const cleanupMs = options.cleanupIntervalMs ?? MEMORY_CONFIG.LOG_CLEANUP_INTERVAL_MS;
+        this.cleanupIntervalMs = cleanupMs > 0 ? cleanupMs : MEMORY_CONFIG.LOG_CLEANUP_INTERVAL_MS;
+
+        // 缓冲区存储 {timestamp, line} 对象
         this.buffer = [];
+
+        // 启动定时清理任务，使用 unref() 避免阻塞进程退出
+        this.cleanupTimer = setInterval(() => {
+            this.pruneExpired(Date.now());
+        }, this.cleanupIntervalMs);
+        this.cleanupTimer.unref();
+    }
+
+    // 添加日志条目（带时间戳）
+    pushEntry(line, timestamp) {
+        this.buffer.push({ timestamp, line });
+        this.lineCount++;
+
+        // 超过行数限制时，丢弃最旧的数据
+        if (this.lineCount > this.maxLines) {
+            this.buffer.shift();
+            this.lineCount--;
+        }
+    }
+
+    // 清理过期日志（超出时间窗口）
+    pruneExpired(now) {
+        const cutoff = now - this.retentionWindowMs;
+
+        // 从头部移除所有过期条目
+        while (this.buffer.length > 0 && this.buffer[0].timestamp < cutoff) {
+            this.buffer.shift();
+            this.lineCount--;
+        }
     }
 
     _transform(chunk, encoding, callback) {
         const lines = chunk.toString().split('\n');
+        const now = Date.now();
 
         for (const line of lines) {
             if (line.trim()) {
-                this.buffer.push(line);
-                this.lineCount++;
-
-                // 超过限制时，丢弃旧数据
-                if (this.lineCount > this.maxLines) {
-                    this.buffer.shift();
-                    this.lineCount--;
-                }
+                this.pushEntry(line, now);
             }
         }
+
+        // 主动触发过期清理
+        this.pruneExpired(now);
 
         // 直接输出，不缓存
         this.push(chunk);
         callback();
     }
 
+    // 清理定时器
+    clearCleanupTimer() {
+        if (this.cleanupTimer) {
+            clearInterval(this.cleanupTimer);
+            this.cleanupTimer = null;
+        }
+    }
+
     _flush(callback) {
-        // 清空缓冲区
+        // 清理定时器和缓冲区
+        this.clearCleanupTimer();
         this.buffer = [];
         this.lineCount = 0;
         callback();
+    }
+
+    _destroy(error, callback) {
+        // 确保定时器被清理
+        this.clearCleanupTimer();
+        this.buffer = [];
+        this.lineCount = 0;
+        super._destroy(error, callback);
     }
 }
 
@@ -205,7 +260,12 @@ function saveConfig( config ) {
 
 // 启动单个项目
 async function startProject(projectName, config, options = {}) {
-    const { logMode = LOG_CONFIG.DEFAULT_MODE, logDir = LOG_CONFIG.DEFAULT_DIR, platformName = 'default' } = options;
+    const {
+        logMode = LOG_CONFIG.DEFAULT_MODE,
+        logDir = LOG_CONFIG.DEFAULT_DIR,
+        platformName = 'default',
+        logBufferWindowMs = null // 日志缓冲区时间窗口（毫秒）
+    } = options;
     const projectConfig = config.projects[projectName];
 
     if (!projectConfig) {
@@ -346,9 +406,10 @@ async function startProject(projectName, config, options = {}) {
 
     // 如果是 console 或 both 模式，处理输出
     if (logMode === LOG_CONFIG.MODES.CONSOLE || logMode === LOG_CONFIG.MODES.BOTH) {
-        // 创建流量控制的Transform Stream
-        const stdoutThrottle = new ThrottledOutputStream();
-        const stderrThrottle = new ThrottledOutputStream();
+        // 创建流量控制的Transform Stream，传入时间窗口配置
+        const throttleOptions = logBufferWindowMs !== null ? { retentionWindowMs: logBufferWindowMs } : {};
+        const stdoutThrottle = new ThrottledOutputStream(throttleOptions);
+        const stderrThrottle = new ThrottledOutputStream(throttleOptions);
 
         // 使用pipe连接，避免在内存中累积所有数据
         process.stdout.pipe(stdoutThrottle).on('data', (data) => {
@@ -582,7 +643,8 @@ function parseArgs(args) {
         command: null,
         logMode: LOG_CONFIG.DEFAULT_MODE,
         logDir: LOG_CONFIG.DEFAULT_DIR,
-        logRetentionDays: LOG_CONFIG.DEFAULT_RETENTION_DAYS
+        logRetentionDays: LOG_CONFIG.DEFAULT_RETENTION_DAYS,
+        logBufferWindowMs: null // 日志缓冲区时间窗口（毫秒）
     };
 
     // 提取非选项参数（平台/项目名称）
@@ -597,6 +659,13 @@ function parseArgs(args) {
             parsed.logDir = arg.split('=')[1];
         } else if (arg.startsWith('--log-retention=')) {
             parsed.logRetentionDays = parseInt(arg.split('=')[1], 10);
+        } else if (arg.startsWith('--log-buffer-window-min=')) {
+            // 支持以分钟为单位设置时间窗口
+            const minutes = parseInt(arg.split('=')[1], 10);
+            parsed.logBufferWindowMs = minutes * 60 * 1000;
+        } else if (arg.startsWith('--log-buffer-window-ms=')) {
+            // 支持以毫秒为单位设置时间窗口
+            parsed.logBufferWindowMs = parseInt(arg.split('=')[1], 10);
         } else {
             nonOptionArgs.push(arg);
         }
@@ -705,7 +774,8 @@ async function main() {
             const proc = await startProject(project, config, {
                 logMode: args.logMode,
                 logDir: args.logDir,
-                platformName: platformName
+                platformName: platformName,
+                logBufferWindowMs: args.logBufferWindowMs || config.logBufferWindowMs || null
             });
 
             if (proc) {

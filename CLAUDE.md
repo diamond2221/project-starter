@@ -1,198 +1,17 @@
-# CLAUDE.md 开发准则
+# CLAUDE.md 开发准则（必须强制遵循）
 
 ## 概览
 本文件用于指导在当前仓库内进行的全部开发与文档工作，确保输出遵循强制性标准并保持可审计性。
 
 ### CLI 工具上下文协议
-
-本项目采用**多层工具生态**，每类工具有明确的职责边界和调用时机：
-
-**详细策略文档**：
-- **工具生态与选择**（@~/.claude/workflows/intelligent-tools-strategy.md）：Gemini、Qwen、Codex CLI的选择决策、MODE系统、命令模板
-- **上下文搜索策略**（@~/.claude/workflows/context-search-strategy.md）：rg、find、code-index等搜索工具的使用指南
-- **MCP 工具策略**（@~/.claude/workflows/mcp-tool-strategy.md）：Exa等MCP工具的触发条件
-
-**工具选择快速指南**：见下方"🔧 工具生态与选择策略"章节。
+- **智能工具策略**（@~/.claude/workflows/intelligent-tools-strategy.md）：在调用组合工具前先确认上下文注入顺序与冲突处理方式。
+- **上下文搜索命令**（@~/.claude/workflows/context-search-strategy.md）：按照既定查询模板管理检索结果，并回写引用来源。
+- **MCP 工具策略**（@~/.claude/workflows/mcp-tool-strategy.md）：明确每类 MCP 的触发条件、失败补救措施与记录要求。
 
 **上下文信息要求**
 - 在编码前至少分析 3 个现有实现或模式，识别可复用的接口与约束。
 - 绘制依赖与集成点，确认输入输出协议、配置与环境需求。
 - 弄清现有测试框架、命名约定和格式化规则，确保输出与代码库保持一致。
-
-## 🔧 工具生态与选择策略
-
-详细规范参考 @~/.claude/workflows/intelligent-tools-strategy.md，本章节提供快速决策指南。
-
-### 工具全景图
-
-**MCP工具层**（通过MCP服务器调用）
-- `sequential-thinking`：深度思考分析（主AI和Codex必须使用，任何操作前强制执行）
-- `shrimp-task-manager`：任务拆解和进度跟踪（>3步骤或>3文件的复杂任务）
-- `mcp__codex__codex`：Codex分析AI调度（深度推理、上下文收集、质量审查）
-- `code-index`：代码语义搜索（内部代码检索优先使用）
-- `exa`：外部信息检索（代码查询、实时信息）
-
-**CLI工具层**（通过Bash命令调用）
-- `gemini`：分析、理解、探索、文档生成（主力分析工具）
-- `qwen`：分析、理解、探索、文档生成（Gemini不可用时的后备）
-- `codex`：开发、实现、自动化（独立的CLI工具，与MCP的Codex互补）
-
-**搜索工具层**（Bash原生工具）
-- `rg`（ripgrep）：内容搜索（优先，支持正则）
-- `find`：文件名/路径搜索
-- `grep`：内容搜索（rg不可用时的后备）
-- `get_modules_by_depth.sh`：程序架构分析（规划前强制执行）
-
-### 工具选择决策树
-
-| 任务类型 | 首选工具 | 后备工具 | 触发条件 |
-|---------|---------|---------|---------|
-| **深度思考** | sequential-thinking | 无 | 任何操作前强制 |
-| **上下文收集** | Codex MCP | Gemini CLI | 编码前必须，>10行逻辑 |
-| **快速分析** | Gemini CLI | Qwen CLI | 架构理解、文档生成 |
-| **代码搜索** | code-index | rg > grep | 查找函数、类、模式 |
-| **外部信息** | exa | WebSearch | API文档、最新技术 |
-| **架构分析** | get_modules_by_depth.sh | Gemini CLI | 任务规划前强制 |
-| **开发实现** | Codex CLI | 主AI直接编码 | 复杂逻辑、自动化 |
-| **任务管理** | shrimp-task-manager | TodoWrite | >3步骤复杂任务 |
-
-### MODE执行系统
-
-**三种执行模式**（适用于Gemini、Qwen、Codex CLI）：
-
-**analysis（默认，只读）**
-- 行为：代码分析、架构理解、模式发现、文档阅读
-- 权限：绝对禁止文件创建、修改、删除
-- 输出：文本响应，不操作文件系统
-- 触发：默认模式，无需明确指定
-
-**write（创建/修改文件）**
-- 行为：生成文档、创建代码、修改现有文件
-- 权限：需用户明确指定 `MODE: write`
-- 触发：用户明确要求"生成文档"、"修改代码"、"创建文件"
-- 参数：Gemini/Qwen需添加 `--approval-mode yolo`
-
-**auto（全自动开发）**
-- 行为：自主开发、完整实现、测试、验证
-- 权限：需用户明确指定 `MODE: auto`
-- 触发：用户明确要求"实现"、"开发"、"自动化完成"
-- 参数：Codex CLI需添加 `-s danger-full-access --skip-git-repo-check`
-
-**写操作保护原则**：
-- 默认所有工具为 analysis 模式（只读安全）
-- write/auto 模式需用户在任务描述中明确指定 MODE
-- 例外：用户提供清晰指令如"modify X"、"create Y"、"implement Z"
-
-### 快速调用模板
-
-#### Gemini/Qwen CLI 模板
-
-```bash
-# 分析模式（只读，默认）
-cd [directory] && gemini -p "
-PURPOSE: [清晰的分析目标]
-TASK: [具体分析任务]
-MODE: analysis
-CONTEXT: @**/*
-EXPECTED: [期望输出]
-RULES: $(cat ~/.claude/workflows/cli-templates/prompts/analysis/pattern.txt)
-"
-
-# 写入模式（需明确指定）
-cd [directory] && gemini -p "
-PURPOSE: [清晰目标]
-TASK: [具体任务]
-MODE: write
-CONTEXT: @**/*
-EXPECTED: [期望交付物]
-RULES: $(cat ~/.claude/workflows/cli-templates/prompts/development/feature.txt)
-" --approval-mode yolo
-
-# Qwen后备（Gemini不可用时）
-cd [directory] && qwen -p "[同上]"
-```
-
-#### Codex MCP 模板
-
-```bash
-# 首次调用（创建会话）
-mcp__codex__codex(
-  model="gpt-5-codex",
-  sandbox="danger-full-access",
-  approval-policy="on-failure",
-  prompt="
-[TASK_MARKER: YYYYMMDD-HHMMSS-XXXX]
-
-目标：[1-2句话描述]
-输出：[交付物列表]
-约束：[限制条件]
-
-请在响应末尾附加：[CONVERSATION_ID]: <conversationId>
-"
-)
-
-# 继续会话
-mcp__codex__codex-reply(
-  conversationId="<已记录的ID>",
-  prompt="[后续指令]"
-)
-```
-
-#### 搜索工具快速命令
-
-```bash
-# 代码内容搜索（优先使用rg）
-rg "pattern" --type ts -n              # TypeScript文件，显示行号
-rg -i "case-insensitive" .             # 忽略大小写
-rg -C 3 "context"                      # 显示前后3行
-
-# 文件名搜索
-find . -name "*.ts" -type f            # 查找TypeScript文件
-find . -path "*/node_modules" -prune -o -name "*.js" -print
-
-# 程序架构分析（规划前强制）
-~/.claude/scripts/get_modules_by_depth.sh
-
-# 语义文件发现（code-index或Gemini）
-cd [directory] && gemini -p "
-PURPOSE: 发现与任务相关的文件
-TASK: 列出所有与[功能/任务]相关的文件
-MODE: analysis
-CONTEXT: @**/*
-EXPECTED: 相关文件路径及相关性说明
-RULES: 聚焦任务需求的直接相关性
-"
-```
-
-### CONTEXT字段配置
-
-**默认模式**：使用 `@**/*` 包含所有文件
-
-**目录导航**：
-- 单目录：`cd src/auth && gemini -p "CONTEXT: @**/*"`
-- 跨目录：`cd src/auth && gemini -p "CONTEXT: @**/* @../shared/**/*" --include-directories ../shared`
-
-**关键规则**：
-- `@../dir/**/*` 在CONTEXT中 → 必须添加 `--include-directories ../dir`
-- 最多包含5个额外目录
-- 路径相对于cd后的当前目录
-
-### 工具链集成流程
-
-**标准6步骤**（强制）：
-1. **sequential-thinking**：深度思考任务目标、风险、验证方式
-2. **get_modules_by_depth.sh**：架构分析（如需要）
-3. **Codex MCP**：上下文收集（`.claude/context-*.json`）
-4. **Gemini CLI**：快速分析补充（可选）
-5. **shrimp-task-manager**：任务拆解和规划
-6. **执行层**：主AI编码 + Codex审查 或 Codex CLI自动实现
-
-**禁止事项**：
-- ❌ 跳过 sequential-thinking（任何操作前强制）
-- ❌ 跳过架构分析（复杂任务规划前强制）
-- ❌ 主AI自行收集上下文（必须委托Codex或Gemini）
-- ❌ 在CONTEXT中引用外部目录但不添加 `--include-directories`
-- ❌ 使用Windows命令（findstr、dir、where），必须用Bash（rg、find、grep）
 
 ## 🔒 强制验证机制
 - 必须拒绝一切 CI、远程流水线或人工外包验证，所有验证均由本地 AI 自动执行。
@@ -274,33 +93,14 @@ RULES: 聚焦任务需求的直接相关性
 - 问题驱动优先于流程驱动，追求充分性而非完整性，动态调整而非僵化执行。
 
 ### 🔗 工具链执行顺序（必须）
-
-**核心链路**：
 - 严格按照 sequential-thinking → shrimp-task-manager → Codex 的顺序执行。
 - 任一环节失败时，必须在操作日志中记录原因、补救措施与重新执行结果。
 - 禁止跳过或调换顺序，必要时通过人工流程模拟缺失工具并记录。
 
-**工具生态整合**：
-- 上下文收集前可使用 Gemini CLI 进行快速分析
-- 代码搜索优先使用 code-index，降级使用 rg > grep
-- 架构分析优先使用 get_modules_by_depth.sh
-- 详细工具选择决策参考上方"工具生态与选择策略"章节和 @~/.claude/workflows/intelligent-tools-strategy.md
-
 ### 🔍 搜索工具优先级（必须）
-
-**外部信息检索**：
-- 必须优先使用 exa MCP；如需其他搜索引擎，需说明原因并补充引用。
-
-**内部代码/文档检索**：
-- 语义搜索：优先使用 code-index MCP
-- 内容搜索：rg（ripgrep）> grep（后备）
-- 文件名搜索：find
-- 架构分析：get_modules_by_depth.sh（任务规划前强制执行）
-- 若工具不可用，需在日志中声明并改用人工方法。
-
-**所有引用资料必须写明来源与用途，保持可追溯。**
-
-详细命令参考 @~/.claude/workflows/context-search-strategy.md
+- 外部信息检索必须优先使用 exa MCP；如需其他搜索引擎，需说明原因并补充引用。
+- 内部代码或文档检索必须优先使用 code-index；若工具不可用，需在日志中声明并改用人工方法。
+- 所有引用资料必须写明来源与用途，保持可追溯。
 
 ### 🤝 Codex MCP 协作与上下文收集规范（必须）
 
